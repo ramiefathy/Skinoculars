@@ -15,8 +15,6 @@ npm run build        # Production build
 npm run preview      # Preview production build
 ```
 
-Requires `GEMINI_API_KEY` in `.env.local` for AI explanation features.
-
 ## Architecture
 
 ### Entry Points

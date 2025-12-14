@@ -2,34 +2,41 @@
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Run and deploy your AI Studio app
+# Skinoculars
 
-This contains everything you need to run your app locally.
+Skinoculars is an interactive 3D skin anatomy visualization built with React + Three.js.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1Qxr_rK2ngb0OhpTRaOgGOUgOIOkVF-3g
+## Local Development
 
-## Deploy (GitHub Pages / Astro)
+**Prerequisites:** Node.js (recommended: Node 20)
 
-The main site links to the **production** Skinoculars entrypoint at:
+1. `npm install`
+2. `npm run dev`
 
-- `/apps/Skinoculars/dist/index.html`
+## Production Build
 
-This repository deploys the Astro site (`site/dist`) and serves everything in `site/public/` as static files. It does **not** automatically build nested Vite apps under `site/public/apps/*` during the Astro build.
+1. `npm run build`
+2. `npm run preview`
 
-If you change Skinoculars source code, you must rebuild and commit the Vite output:
+## Deploy to `skinoculars.ramiefathy.com`
 
-1. `cd site/public/apps/Skinoculars`
-2. `npm install`
-3. `npm run build`
-4. Commit the updated `site/public/apps/Skinoculars/dist/` folder.
+This repository is set up to deploy to GitHub Pages via GitHub Actions (`.github/workflows/pages.yml`). It also includes:
 
-## Run Locally
+- `public/CNAME` → published as `dist/CNAME` so Pages knows the custom domain
+- `public/.nojekyll` → disables Jekyll processing
 
-**Prerequisites:**  Node.js
+**GitHub**
 
+1. In `ramiefathy/Skinoculars` → Settings → Pages
+2. Set **Build and deployment** → **Source** to **GitHub Actions**
+3. Set **Custom domain** to `skinoculars.ramiefathy.com` and enable **Enforce HTTPS** once available
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+**Cloudflare DNS**
+
+Create a DNS record:
+
+- Type: `CNAME`
+- Name: `skinoculars`
+- Target: `ramiefathy.github.io`
+
+If you proxy through Cloudflare, keep SSL/TLS mode set to **Full (strict)** once GitHub Pages finishes issuing the certificate for the custom domain.
