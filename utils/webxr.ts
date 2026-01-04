@@ -57,6 +57,8 @@ export async function checkWebXRSupport(): Promise<WebXRCapabilities> {
 
 /**
  * WebXR Manager class for handling XR sessions
+ *
+ * Deprecated: not used by the current UI flow. Kept for reference.
  */
 export class WebXRManager {
   private renderer: THREE.WebGLRenderer;

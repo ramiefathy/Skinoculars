@@ -9,6 +9,8 @@ interface XRButtonProps {
   onSessionEnd?: () => void;
   className?: string;
   domOverlayRoot?: HTMLElement | null;
+  handTrackingEnabled?: boolean;
+  framebufferScaleFactor?: number;
 }
 
 export const XRButton: React.FC<XRButtonProps> = ({
@@ -17,7 +19,9 @@ export const XRButton: React.FC<XRButtonProps> = ({
   onSessionStart,
   onSessionEnd,
   className,
-  domOverlayRoot
+  domOverlayRoot,
+  handTrackingEnabled = false,
+  framebufferScaleFactor
 }) => {
   const [capabilities, setCapabilities] = useState<WebXRCapabilities | null>(null);
   const [isPresenting, setIsPresenting] = useState(false);
@@ -66,20 +70,25 @@ export const XRButton: React.FC<XRButtonProps> = ({
       const xr = (navigator as any).xr as XRSystem;
 
       const sessionInit: XRSessionInit = {
-        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+        optionalFeatures: ['local-floor', 'bounded-floor']
       };
 
       if (mode === 'immersive-ar') {
-        sessionInit.optionalFeatures?.push('hit-test', 'dom-overlay', 'light-estimation');
+        sessionInit.optionalFeatures?.push('hand-tracking', 'hit-test', 'dom-overlay', 'light-estimation');
         if (domOverlayRoot) {
           (sessionInit as any).domOverlay = { root: domOverlayRoot };
         }
+      } else if (handTrackingEnabled) {
+        sessionInit.optionalFeatures?.push('hand-tracking');
       }
 
       const session = await xr.requestSession(mode, sessionInit);
 
       // Enable XR on renderer
       renderer.xr.enabled = true;
+      if (framebufferScaleFactor) {
+        renderer.xr.setFramebufferScaleFactor(framebufferScaleFactor);
+      }
       await renderer.xr.setSession(session);
 
       setCurrentSession(session);
@@ -194,6 +203,8 @@ export const XRModeSelector: React.FC<{
   domOverlayRoot?: HTMLElement | null;
 }> = ({ renderer, onSessionStart, onSessionEnd, className, domOverlayRoot }) => {
   const [capabilities, setCapabilities] = useState<WebXRCapabilities | null>(null);
+  const [handTrackingEnabled, setHandTrackingEnabled] = useState(false);
+  const [vrQuality, setVrQuality] = useState<'low' | 'medium' | 'high'>('medium');
 
   useEffect(() => {
     checkWebXRSupport().then(setCapabilities);
@@ -208,13 +219,41 @@ export const XRModeSelector: React.FC<{
   }
 
   return (
-    <div className={`flex gap-2 ${className}`}>
+    <div className={`flex flex-col gap-2 ${className}`}>
+      {capabilities.supportsVR && (
+        <div className="flex flex-col gap-2 text-xs text-slate-200 bg-slate-900/60 px-2 py-2 rounded-md border border-slate-700/60">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={handTrackingEnabled}
+              onChange={event => setHandTrackingEnabled(event.target.checked)}
+              className="h-3 w-3 rounded border-slate-400 text-blue-500 focus:ring-blue-400"
+            />
+            <span>Enable hand tracking (experimental)</span>
+          </label>
+          <label className="flex items-center justify-between gap-2">
+            <span>VR Quality</span>
+            <select
+              value={vrQuality}
+              onChange={event => setVrQuality(event.target.value as typeof vrQuality)}
+              className="bg-slate-800 text-slate-100 text-xs rounded px-2 py-1 border border-slate-600"
+            >
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+        </div>
+      )}
+      <div className="flex gap-2">
       {capabilities.supportsVR && (
         <XRButton
           renderer={renderer}
           mode="immersive-vr"
           onSessionStart={onSessionStart}
           onSessionEnd={onSessionEnd}
+          handTrackingEnabled={handTrackingEnabled}
+          framebufferScaleFactor={vrQuality === 'low' ? 0.7 : vrQuality === 'medium' ? 0.8 : 1}
         />
       )}
       {capabilities.supportsAR && (
@@ -223,8 +262,10 @@ export const XRModeSelector: React.FC<{
           mode="immersive-ar"
           onSessionStart={onSessionStart}
           onSessionEnd={onSessionEnd}
+          handTrackingEnabled
         />
       )}
+      </div>
     </div>
   );
 };
