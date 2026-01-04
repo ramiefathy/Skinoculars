@@ -5,7 +5,10 @@ import {
   DiseaseId,
   SkinLayerVisibility,
   TimelineId,
-  ZoomLevelId
+  ZoomLevelId,
+  StructureData,
+  LangCode,
+  getLocalizedString
 } from '../types';
 import { DISEASE_PROFILES, DiseaseProfile } from '../diseaseProfiles';
 import { ZOOM_LEVELS, CameraPose, getLODConfig, LODConfig } from '../zoomLevels';
@@ -23,6 +26,11 @@ import {
   MacrophageSystem,
   VesselSystem
 } from './wound';
+import { XRInputRouter } from './xr/XRInputRouter';
+import { XRUIManager, XR_UI_LAYER } from './xr/XRUIManager';
+import { getSessionModeKind, XRModeKind } from './xr/XRSessionMode';
+import { AnchorTransform, captureAnchorTransform, placeAnchorInFrontOfViewer, restoreAnchorTransform } from './xr/XRPlacement';
+import { XR_QUALITY_PRESETS, createPerfMonitor, XRQualityTier } from './xr/XRPerfProfile';
 
 export interface SkinSceneHandle {
   resetView: () => void;
@@ -37,6 +45,8 @@ interface SkinSceneProps {
   visibility: SkinLayerVisibility;
   onSelectStructure: (id: string | null) => void;
   onHoverStructure?: (id: string | null, x: number, y: number) => void;
+  selectedStructure?: StructureData | null;
+  lang?: LangCode;
   diseaseId: DiseaseId;
   timelineId: TimelineId;
   timelineT: number;
@@ -53,6 +63,9 @@ interface SkinSceneProps {
   collagenReduced: boolean;
   onLoadingChange?: (loading: boolean, progress: number) => void;
   cutawayEnabled?: boolean;
+  onAnchorScaleChange?: (scale: number) => void;
+  onAutoRotateToggle?: () => void;
+  onXrPerfTierChange?: (tier: XRQualityTier) => void;
 }
 
 interface ModelParameters {
@@ -117,6 +130,8 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   visibility,
   onSelectStructure,
   onHoverStructure,
+  selectedStructure,
+  lang = 'en',
   diseaseId,
   timelineId,
   timelineT,
@@ -132,7 +147,10 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   phValue = DEFAULT_PH_STATE.value,
   collagenReduced,
   onLoadingChange,
-  cutawayEnabled = false
+  cutawayEnabled = false,
+  onAnchorScaleChange,
+  onAutoRotateToggle,
+  onXrPerfTierChange
 }, ref) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -147,10 +165,25 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const onHoverStructureRef = useRef(onHoverStructure);
+  const onAnchorScaleChangeRef = useRef(onAnchorScaleChange);
+  const onAutoRotateToggleRef = useRef(onAutoRotateToggle);
+  const onXrPerfTierChangeRef = useRef(onXrPerfTierChange);
 
   useEffect(() => {
     onHoverStructureRef.current = onHoverStructure;
   }, [onHoverStructure]);
+
+  useEffect(() => {
+    onAnchorScaleChangeRef.current = onAnchorScaleChange;
+  }, [onAnchorScaleChange]);
+
+  useEffect(() => {
+    onAutoRotateToggleRef.current = onAutoRotateToggle;
+  }, [onAutoRotateToggle]);
+
+  useEffect(() => {
+    onXrPerfTierChangeRef.current = onXrPerfTierChange;
+  }, [onXrPerfTierChange]);
 
   // Expose resetView and captureScreenshot to parent
   useImperativeHandle(ref, () => ({
@@ -226,6 +259,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     vessels: []
   });
   const keratinocyteMeshRef = useRef<THREE.InstancedMesh | null>(null);
+  const flakeMeshRef = useRef<THREE.InstancedMesh | null>(null);
   const keratinocyteBaseRef = useRef<{
     positions: Float32Array;
     scales: Float32Array;      // visible scales (may start reduced near wound)
@@ -238,6 +272,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   const keratinocyteAgeRef = useRef<Float32Array | null>(null);
   const melanosomeMeshRef = useRef<THREE.InstancedMesh | null>(null);
   const melanocyteMeshRef = useRef<THREE.InstancedMesh | null>(null);
+  const adiposeMeshRef = useRef<THREE.InstancedMesh | null>(null);
 
   const materialsRef = useRef<THREE.Material[]>([]);
   const paletteRef = useRef<PaletteId>('clinical');
@@ -258,12 +293,23 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   const woundSystemsGroupRef = useRef<THREE.Group | null>(null);
   const anchorGroupRef = useRef<THREE.Group | null>(null);
   const isXrPresentingRef = useRef<boolean>(false);
+  const defaultBackgroundRef = useRef<THREE.Color | null>(null);
+  const defaultFogRef = useRef<THREE.Fog | null>(null);
 
   // WebXR hit-test state for AR placement
   const xrRefSpaceRef = useRef<XRReferenceSpace | null>(null);
   const viewerSpaceRef = useRef<XRReferenceSpace | null>(null);
   const hitTestSourceRef = useRef<XRHitTestSource | null>(null);
   const lastHitMatrixRef = useRef<THREE.Matrix4 | null>(null);
+  const xrModeKindRef = useRef<XRModeKind>('unknown');
+  const xrUiManagerRef = useRef<XRUIManager | null>(null);
+  const xrInputRouterRef = useRef<XRInputRouter | null>(null);
+  const pendingVrPlacementRef = useRef(false);
+  const preXrAnchorTransformRef = useRef<AnchorTransform | null>(null);
+  const perfMonitorRef = useRef(createPerfMonitor('medium'));
+  const xrQualityTierRef = useRef<XRQualityTier>('medium');
+  const baseInstanceCountsRef = useRef<Record<string, number>>({});
+  const xrInstanceMultiplierRef = useRef(1);
   const reticleRef = useRef<THREE.Mesh | null>(null);
 
   // Refs to access current props in animation loop without re-renders
@@ -321,6 +367,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     mouseRef.current.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     mouseRef.current.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
+    raycasterRef.current.layers.set(0);
     const intersects = raycasterRef.current.intersectObjects(sceneRef.current.children, true);
     for (const i of intersects) {
       const obj: any = i.object;
@@ -341,6 +388,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     const raycaster = raycasterRef.current;
     raycaster.ray.origin.copy(origin);
     raycaster.ray.direction.copy(direction).normalize();
+    raycaster.layers.set(0);
     const intersects = raycaster.intersectObjects(sceneRef.current.children, true);
     for (const i of intersects) {
       const obj: any = i.object;
@@ -353,6 +401,52 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
       }
     }
     return null;
+  }, []);
+
+  const applyXrRuntimeQuality = useCallback((tier: XRQualityTier) => {
+    const multiplier = XR_QUALITY_PRESETS[tier].xrInstanceMultiplier;
+    xrQualityTierRef.current = tier;
+    xrInstanceMultiplierRef.current = multiplier;
+
+    const applyCount = (mesh: THREE.InstancedMesh | null, key: string) => {
+      if (!mesh) return;
+      const base = baseInstanceCountsRef.current[key];
+      if (!base) return;
+      mesh.count = Math.max(1, Math.floor(base * multiplier));
+      mesh.instanceMatrix.needsUpdate = true;
+    };
+
+    applyCount(flakeMeshRef.current, 'flake');
+    applyCount(keratinocyteMeshRef.current, 'keratinocyte');
+    applyCount(melanocyteMeshRef.current, 'melanocyte');
+    applyCount(melanosomeMeshRef.current, 'melanosome');
+    applyCount(structuresRef.current.collagen, 'collagen');
+    applyCount(adiposeMeshRef.current, 'adipose');
+  }, []);
+
+  const restoreDefaultInstanceCounts = useCallback(() => {
+    xrInstanceMultiplierRef.current = 1;
+    const applyCount = (mesh: THREE.InstancedMesh | null, key: string) => {
+      if (!mesh) return;
+      const base = baseInstanceCountsRef.current[key];
+      if (!base) return;
+      mesh.count = base;
+      mesh.instanceMatrix.needsUpdate = true;
+    };
+    applyCount(flakeMeshRef.current, 'flake');
+    applyCount(keratinocyteMeshRef.current, 'keratinocyte');
+    applyCount(melanocyteMeshRef.current, 'melanocyte');
+    applyCount(melanosomeMeshRef.current, 'melanosome');
+    applyCount(structuresRef.current.collagen, 'collagen');
+    applyCount(adiposeMeshRef.current, 'adipose');
+  }, []);
+
+  const updateAnchorScale = useCallback((value: number) => {
+    const anchor = anchorGroupRef.current;
+    if (!anchor) return;
+    anchor.scale.setScalar(value);
+    anchor.updateMatrixWorld(true);
+    onAnchorScaleChangeRef.current?.(value);
   }, []);
 
   // Touch gesture handlers
@@ -725,6 +819,8 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     );
     stratumCorneumMatRef.current = flakeMat as THREE.MeshPhysicalMaterial;
     const flakeMesh = new THREE.InstancedMesh(flakeGeo, flakeMat, params.flakeCount);
+    flakeMeshRef.current = flakeMesh;
+    baseInstanceCountsRef.current.flake = flakeMesh.count;
     flakeMesh.castShadow = false;
     flakeMesh.receiveShadow = false;
     flakeMesh.userData.type = 'stratum_corneum';
@@ -762,6 +858,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     cellMesh.userData.type = 'keratinocytes';
     structureRootsRef.current['keratinocytes'] = cellMesh;
     keratinocyteMeshRef.current = cellMesh;
+    baseInstanceCountsRef.current.keratinocyte = cellMesh.count;
     const kPositions = new Float32Array(params.keratinocyteCount * 3);
     const kScales = new Float32Array(params.keratinocyteCount);
     const kFullScales = new Float32Array(params.keratinocyteCount);
@@ -835,6 +932,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     }
     melanocyteMesh.instanceMatrix.needsUpdate = true;
     melanocyteMeshRef.current = melanocyteMesh;
+    baseInstanceCountsRef.current.melanocyte = melanocyteMesh.count;
     epidermisGroup.add(melanocyteMesh);
 
     // Melanosomes (packets) - will animate scale based on melanin boost
@@ -863,6 +961,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     }
     melanosomeMesh.instanceMatrix.needsUpdate = true;
     melanosomeMeshRef.current = melanosomeMesh;
+    baseInstanceCountsRef.current.melanosome = melanosomeMesh.count;
     epidermisGroup.add(melanosomeMesh);
 
     // --- Dermis split: papillary + reticular ---
@@ -937,6 +1036,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     collagenMesh.userData.type = 'collagen';
     structureRootsRef.current['collagen'] = collagenMesh;
     structuresRef.current.collagen = collagenMesh;
+    baseInstanceCountsRef.current.collagen = collagenMesh.count;
 
     const dummyFiber = new THREE.Object3D();
     for (let i = 0; i < params.collagenFiberCount; i++) {
@@ -1213,6 +1313,8 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     adiposeMesh.receiveShadow = true;
     adiposeMesh.userData.type = 'adipose';
     structureRootsRef.current['adipose'] = adiposeMesh;
+    adiposeMeshRef.current = adiposeMesh;
+    baseInstanceCountsRef.current.adipose = adiposeMesh.count;
     const dummyFat = new THREE.Object3D();
     for (let i = 0; i < params.adipocyteCount; i++) {
       dummyFat.position.set(
@@ -1289,6 +1391,8 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     scene.background = new THREE.Color(0x0f172a);
     scene.fog = new THREE.FogExp2(0x0f172a, 0.02);
     sceneRef.current = scene;
+    defaultBackgroundRef.current = scene.background as THREE.Color | null;
+    defaultFogRef.current = scene.fog as THREE.Fog | null;
 
     // Anchor root for AR placement (wrap all anatomy)
     const anchorGroup = new THREE.Group();
@@ -1399,6 +1503,44 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     scene.add(reticle);
     reticleRef.current = reticle;
 
+    const xrUiManager = new XRUIManager(scene);
+    xrUiManager.setVisible(false);
+    xrUiManager.setActionHandler(action => {
+      const anchor = anchorGroupRef.current;
+      if (!anchor) return;
+      switch (action) {
+        case 'recenter': {
+          if (!rendererRef.current || !cameraRef.current) return;
+          const xrCam = rendererRef.current.xr.getCamera(cameraRef.current);
+          placeAnchorInFrontOfViewer({
+            anchor,
+            xrCamera: xrCam,
+            distanceM: 1.2,
+            verticalOffsetM: -0.25,
+            faceViewerYawOnly: true
+          });
+          break;
+        }
+        case 'scaleUp': {
+          const next = THREE.MathUtils.clamp(anchor.scale.x + 0.05, 0.25, 0.7);
+          updateAnchorScale(next);
+          break;
+        }
+        case 'scaleDown': {
+          const next = THREE.MathUtils.clamp(anchor.scale.x - 0.05, 0.25, 0.7);
+          updateAnchorScale(next);
+          break;
+        }
+        case 'toggleAutoRotate': {
+          onAutoRotateToggleRef.current?.();
+          break;
+        }
+        default:
+          break;
+      }
+    });
+    xrUiManagerRef.current = xrUiManager;
+
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
@@ -1429,57 +1571,58 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
       onSelectStructureRef.current?.(id ?? null);
     };
 
-    // XR controller select → pick structure or place anchor
-    const addControllerHandler = (index: number) => {
-      const controller = renderer.xr.getController(index);
-      controller.addEventListener('select', () => {
-        // If we have a recent hit test pose, place the anchor; otherwise pick structures
-      if (renderer.xr.isPresenting && lastHitMatrixRef.current && anchorGroupRef.current) {
-        anchorGroupRef.current.matrix.copy(lastHitMatrixRef.current);
-        anchorGroupRef.current.matrix.decompose(
-          anchorGroupRef.current.position,
-          anchorGroupRef.current.quaternion,
-          anchorGroupRef.current.scale
-        );
-        anchorGroupRef.current.updateMatrixWorld(true);
-
-        // Apply XR LOD rebuild once anchor is placed to ensure counts are reduced
-        const lodConfig = getLODConfig(zoomLevelId);
-        const params = computeParameters(diseaseId, lodConfig, 0.6);
-        clearAnatomy();
-        buildAnatomy(params);
-        applyExplode(explodeValue);
-      } else {
-          const tempMatrix = new THREE.Matrix4();
-          tempMatrix.identity().extractRotation(controller.matrixWorld);
-          const direction = new THREE.Vector3(0, 0, -1).applyMatrix4(tempMatrix);
-          const origin = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
-          const id = pickStructureFromRay(origin, direction);
-          if (id) {
-            onSelectStructureRef.current?.(id);
-          }
-        }
-      });
-      scene.add(controller);
-    };
-    addControllerHandler(0);
-    addControllerHandler(1);
+    const xrInputRouter = new XRInputRouter({
+      renderer,
+      camera,
+      scene,
+      anchorGroup: anchorGroupInstance,
+      uiManager: xrUiManager,
+      pickStructureFromRay,
+      onSelectStructure: id => onSelectStructureRef.current?.(id ?? null),
+      onAnchorScaleChange
+    });
+    xrInputRouterRef.current = xrInputRouter;
 
     // Setup AR hit-test on session start
     const handleSessionStart = async () => {
       const session = renderer.xr.getSession();
       if (!session) return;
+      xrModeKindRef.current = getSessionModeKind(session);
       xrRefSpaceRef.current = await session.requestReferenceSpace('local-floor').catch(() => null);
       viewerSpaceRef.current = await session.requestReferenceSpace('viewer').catch(() => null);
-      if (viewerSpaceRef.current) {
+
+      if (xrModeKindRef.current === 'ar' && viewerSpaceRef.current) {
         hitTestSourceRef.current = await (session as any).requestHitTestSource?.({ space: viewerSpaceRef.current }).catch(() => null);
+      } else {
+        hitTestSourceRef.current?.cancel?.();
+        hitTestSourceRef.current = null;
+        if (reticleRef.current) reticleRef.current.visible = false;
       }
+
+      if (xrModeKindRef.current === 'vr') {
+        preXrAnchorTransformRef.current = anchorGroupInstance ? captureAnchorTransform(anchorGroupInstance) : null;
+        pendingVrPlacementRef.current = true;
+        xrUiManagerRef.current?.setVisible(true);
+      } else {
+        xrUiManagerRef.current?.setVisible(false);
+      }
+
+      xrInputRouterRef.current?.attachSession(session);
+      applyXrRuntimeQuality(xrQualityTierRef.current);
+      onXrPerfTierChangeRef.current?.(xrQualityTierRef.current);
+
       session.addEventListener('end', () => {
         hitTestSourceRef.current?.cancel?.();
         hitTestSourceRef.current = null;
         viewerSpaceRef.current = null;
         xrRefSpaceRef.current = null;
+        xrInputRouterRef.current?.detachSession();
         if (reticleRef.current) reticleRef.current.visible = false;
+        xrUiManagerRef.current?.setVisible(false);
+        restoreDefaultInstanceCounts();
+        if (preXrAnchorTransformRef.current && anchorGroupInstance) {
+          restoreAnchorTransform(anchorGroupInstance, preXrAnchorTransformRef.current);
+        }
       });
     };
     renderer.xr.addEventListener('sessionstart', handleSessionStart);
@@ -1527,25 +1670,55 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
       lastFrameTimeRef.current = now;
       const clampedDt = Math.min(dt, 0.1); // Cap at 100ms to prevent huge jumps
 
-      // AR hit-test reticle update
       isXrPresentingRef.current = rendererRef.current.xr.isPresenting;
 
-      if (rendererRef.current.xr.isPresenting && frame && hitTestSourceRef.current) {
-        const refSpace = xrRefSpaceRef.current ?? rendererRef.current.xr.getReferenceSpace();
-        const results = frame.getHitTestResults(hitTestSourceRef.current);
-        if (results.length > 0) {
-          const pose = refSpace ? results[0].getPose(refSpace) : null;
-          if (pose) {
-            const mat = new THREE.Matrix4().fromArray(pose.transform.matrix as unknown as number[]);
-            lastHitMatrixRef.current = mat;
-            if (reticleRef.current) {
-              reticleRef.current.visible = true;
-              reticleRef.current.position.setFromMatrixPosition(mat);
-              reticleRef.current.quaternion.setFromRotationMatrix(mat);
+      if (rendererRef.current.xr.isPresenting && frame) {
+        xrInputRouterRef.current?.update(frame);
+
+        if (xrModeKindRef.current === 'ar' && hitTestSourceRef.current) {
+          const refSpace = xrRefSpaceRef.current ?? rendererRef.current.xr.getReferenceSpace();
+          const results = frame.getHitTestResults(hitTestSourceRef.current);
+          if (results.length > 0) {
+            const pose = refSpace ? results[0].getPose(refSpace) : null;
+            if (pose) {
+              const mat = new THREE.Matrix4().fromArray(pose.transform.matrix as unknown as number[]);
+              lastHitMatrixRef.current = mat;
+              if (reticleRef.current) {
+                reticleRef.current.visible = true;
+                reticleRef.current.position.setFromMatrixPosition(mat);
+                reticleRef.current.quaternion.setFromRotationMatrix(mat);
+              }
             }
+          } else if (reticleRef.current) {
+            reticleRef.current.visible = false;
           }
-        } else if (reticleRef.current) {
-          reticleRef.current.visible = false;
+        }
+
+        if (xrModeKindRef.current === 'vr' && pendingVrPlacementRef.current && anchorGroupRef.current) {
+          const xrCam = rendererRef.current.xr.getCamera(cameraRef.current);
+          placeAnchorInFrontOfViewer({
+            anchor: anchorGroupRef.current,
+            xrCamera: xrCam,
+            distanceM: 1.2,
+            verticalOffsetM: -0.25,
+            faceViewerYawOnly: true
+          });
+          pendingVrPlacementRef.current = false;
+        }
+
+        if (xrModeKindRef.current === 'vr' && xrUiManagerRef.current) {
+          const xrCam = rendererRef.current.xr.getCamera(cameraRef.current);
+          xrUiManagerRef.current.updateHeadLocked(xrCam);
+          const headPos = new THREE.Vector3();
+          const headDir = new THREE.Vector3();
+          xrCam.getWorldPosition(headPos);
+          xrCam.getWorldDirection(headDir);
+          const reticlePos = headPos.clone().add(headDir.multiplyScalar(1.2));
+          xrUiManagerRef.current.updateReticle(reticlePos);
+          const session = rendererRef.current.xr.getSession();
+          const inputCount = session?.inputSources.length ?? 0;
+          const selectedId = selectedStructure?.id ?? 'none';
+          xrUiManagerRef.current.setDebugText(`Tier ${xrQualityTierRef.current} • Inputs ${inputCount} • ${selectedId}`);
         }
       }
 
@@ -1622,19 +1795,33 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
       // Disable orbit controls when XR is presenting (headset controls pose)
       if (rendererRef.current.xr.isPresenting) {
         controlsRef.current && (controlsRef.current.enabled = false);
-        // Transparent background and no fog for passthrough AR
+
         if (sceneRef.current) {
-          sceneRef.current.background = null;
-          sceneRef.current.fog = null as any;
+          if (xrModeKindRef.current === 'ar') {
+            sceneRef.current.background = null;
+            sceneRef.current.fog = null as any;
+          } else if (xrModeKindRef.current === 'vr') {
+            sceneRef.current.background = new THREE.Color(0x020617);
+            sceneRef.current.fog = defaultFogRef.current;
+          }
         }
-        // XR performance profile
-        rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
+
+        const perfState = perfMonitorRef.current.push(clampedDt * 1000);
+        if (perfState.tier !== xrQualityTierRef.current) {
+          applyXrRuntimeQuality(perfState.tier);
+          onXrPerfTierChangeRef.current?.(perfState.tier);
+        }
+
         rendererRef.current.shadowMap.enabled = false;
       } else {
         controlsRef.current && (controlsRef.current.enabled = true);
         controlsRef.current?.update();
         rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         rendererRef.current.shadowMap.enabled = true;
+        if (sceneRef.current) {
+          sceneRef.current.background = defaultBackgroundRef.current;
+          sceneRef.current.fog = defaultFogRef.current;
+        }
         // Shadow map textures are managed internally by Three.js
       }
 
@@ -1643,7 +1830,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     renderer.setAnimationLoop(renderLoop);
 
     const lodConfig = getLODConfig(zoomLevelId);
-    const params = computeParameters(diseaseId, lodConfig, isXrPresentingRef.current ? 0.6 : 1);
+    const params = computeParameters(diseaseId, lodConfig, isXrPresentingRef.current ? xrInstanceMultiplierRef.current : 1);
     clearAnatomy();
     buildAnatomy(params);
     applyExplode(explodeValue);
@@ -1659,7 +1846,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
     const handleContextRestored = () => {
       console.log('WebGL context restored');
       const restoredLodConfig = getLODConfig(zoomLevelId);
-      const restoredParams = computeParameters(diseaseId, restoredLodConfig, isXrPresentingRef.current ? 0.6 : 1);
+      const restoredParams = computeParameters(diseaseId, restoredLodConfig, isXrPresentingRef.current ? xrInstanceMultiplierRef.current : 1);
       clearAnatomy();
       buildAnatomy(restoredParams);
       applyExplode(explodeValue);
@@ -1710,6 +1897,12 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
         reticleRef.current = null;
       }
 
+      xrInputRouterRef.current?.detachSession();
+      if (xrUiManagerRef.current) {
+        xrUiManagerRef.current.dispose();
+        xrUiManagerRef.current = null;
+      }
+
       sceneRef.current = null;
       cameraRef.current = null;
       rendererRef.current = null;
@@ -1720,7 +1913,7 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   useEffect(() => {
     if (!sceneRef.current) return;
     const lodConfig = getLODConfig(zoomLevelId);
-    const params = computeParameters(diseaseId, lodConfig, isXrPresentingRef.current ? 0.6 : 1);
+    const params = computeParameters(diseaseId, lodConfig, isXrPresentingRef.current ? xrInstanceMultiplierRef.current : 1);
     clearAnatomy();
     buildAnatomy(params);
     applyExplode(explodeValue);
@@ -1733,6 +1926,18 @@ export const SkinScene = forwardRef<SkinSceneHandle, SkinSceneProps>(({
   useEffect(() => {
     applyExplode(explodeValue);
   }, [explodeValue]);
+
+  useEffect(() => {
+    const ui = xrUiManagerRef.current;
+    if (!ui) return;
+    if (selectedStructure) {
+      const title = getLocalizedString(selectedStructure.title, lang);
+      const description = getLocalizedString(selectedStructure.description, lang);
+      ui.setInfo(title, description);
+    } else {
+      ui.clearInfo();
+    }
+  }, [selectedStructure, lang]);
 
   useEffect(() => {
     const epi = epidermisGroupRef.current;

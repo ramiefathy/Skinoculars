@@ -31,6 +31,9 @@ import { PaletteId } from './palettes';
 import { Phototype, PHOTOTYPES, DEFAULT_UV_STATE, UVState, DEFAULT_PH_STATE, PHState } from './behavior';
 import { XRModeSelector } from './components/XRButton';
 import XRHUD from './components/XRHUD';
+import { XRDebugPanel, XRDebugInfo } from './components/XRDebugPanel';
+import { getSessionModeKind } from './components/xr/XRSessionMode';
+import { XRQualityTier } from './components/xr/XRPerfProfile';
 
 // Help Modal Component
 const HelpModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
@@ -105,6 +108,8 @@ const App: React.FC = () => {
   const [xrRenderer, setXrRenderer] = useState<THREE.WebGLRenderer | null>(null);
   const [isXrPresenting, setIsXrPresenting] = useState(false);
   const [anchorScale, setAnchorScale] = useState(0.35);
+  const [xrDebugInfo, setXrDebugInfo] = useState<XRDebugInfo | null>(null);
+  const [xrPerfTier, setXrPerfTier] = useState<XRQualityTier | null>(null);
 
   // Poll once for renderer availability (set by SkinScene)
   useEffect(() => {
@@ -126,7 +131,10 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!xrRenderer) return;
     const onStart = () => setIsXrPresenting(true);
-    const onEnd = () => setIsXrPresenting(false);
+    const onEnd = () => {
+      setIsXrPresenting(false);
+      setXrPerfTier(null);
+    };
     xrRenderer.xr.addEventListener('sessionstart', onStart);
     xrRenderer.xr.addEventListener('sessionend', onEnd);
     // initialize if already presenting
@@ -136,6 +144,51 @@ const App: React.FC = () => {
       xrRenderer.xr.removeEventListener('sessionend', onEnd);
     };
   }, [xrRenderer]);
+
+  useEffect(() => {
+    if (!xrRenderer) return;
+    let interval: number | null = null;
+
+    const updateDebugInfo = () => {
+      const session = xrRenderer.xr.getSession();
+      if (!session) {
+        setXrDebugInfo(null);
+        return;
+      }
+      const enabledFeaturesValue = (session as any).enabledFeatures;
+      const enabledFeatures = enabledFeaturesValue ? Array.from(enabledFeaturesValue) : null;
+      const environmentBlendMode = (session as any).environmentBlendMode ?? 'unknown';
+      setXrDebugInfo({
+        modeKind: getSessionModeKind(session),
+        environmentBlendMode,
+        enabledFeatures,
+        inputSourceCount: session.inputSources.length,
+        perfTier: xrPerfTier ?? 'n/a'
+      });
+    };
+
+    const handleStart = () => {
+      updateDebugInfo();
+      interval = window.setInterval(updateDebugInfo, 1000);
+    };
+
+    const handleEnd = () => {
+      if (interval) window.clearInterval(interval);
+      interval = null;
+      setXrDebugInfo(null);
+    };
+
+    xrRenderer.xr.addEventListener('sessionstart', handleStart);
+    xrRenderer.xr.addEventListener('sessionend', handleEnd);
+
+    if (xrRenderer.xr.isPresenting) handleStart();
+
+    return () => {
+      xrRenderer.xr.removeEventListener('sessionstart', handleStart);
+      xrRenderer.xr.removeEventListener('sessionend', handleEnd);
+      if (interval) window.clearInterval(interval);
+    };
+  }, [xrRenderer, xrPerfTier]);
 
   // App mode
   const [mode, setMode] = useState<AppMode>('study');
@@ -176,6 +229,8 @@ const App: React.FC = () => {
   // Selection state
   const [selectedStructure, setSelectedStructure] = useState<StructureData | null>(null);
   const [hoveredStructure, setHoveredStructure] = useState<{ id: string; x: number; y: number } | null>(null);
+  const hasInfoPanel = Boolean(selectedStructure && mode === 'study');
+  const scienceRightOffset = hasInfoPanel && !isMobile ? 360 : undefined;
 
   // Tour state
   const [activeTourId, setActiveTourId] = useState<string | null>(null);
@@ -190,12 +245,15 @@ const App: React.FC = () => {
   const [palette, setPalette] = useState<PaletteId>('clinical');
   const [phototype, setPhototype] = useState<Phototype>(3);
   const [uvState, setUvState] = useState<UVState>(DEFAULT_UV_STATE);
+  const [uvPulseActive, setUvPulseActive] = useState(false);
   const [hydration, setHydration] = useState(0.6); // 0-1
   const [phState, setPhState] = useState<PHState>(DEFAULT_PH_STATE);
 
   const handleUVPulse = useCallback(() => {
     setUvState(prev => ({ ...prev, dose: 1 }));
+    setUvPulseActive(true);
     setTimeout(() => setUvState(prev => ({ ...prev, dose: 0 })), 2000);
+    setTimeout(() => setUvPulseActive(false), 2000);
   }, []);
 
   // Settings state (read from localStorage)
@@ -584,6 +642,8 @@ const App: React.FC = () => {
           visibility={visibility}
           onSelectStructure={handleSelectStructure}
           onHoverStructure={handleHover}
+          selectedStructure={selectedStructure}
+          lang={lang}
           diseaseId={diseaseId}
         timelineId={timelineId}
         timelineT={timelineT}
@@ -600,6 +660,9 @@ const App: React.FC = () => {
         collagenReduced={collagenReduced}
         onLoadingChange={handleLoadingChange}
         cutawayEnabled={cutawayEnabled}
+        onAnchorScaleChange={handleAnchorScaleChange}
+        onAutoRotateToggle={() => handleAutoRotateChange(!autoRotate)}
+        onXrPerfTierChange={tier => setXrPerfTier(tier)}
       />
 
         {/* Phase HUD for wound healing timeline */}
@@ -634,24 +697,30 @@ const App: React.FC = () => {
       {/* Help modal */}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
 
-      {/* Science overlay toggle & HUD */}
-      <button
-        className="fixed top-4 right-4 z-40 px-3 py-2 rounded-md bg-slate-800/80 border border-slate-700 text-xs text-slate-200 hover:bg-slate-700"
-        onClick={() => setShowScience(v => !v)}
+      {/* Science overlay toggle & UV pulse */}
+      <div
+        className="fixed top-14 sm:top-14 z-40 flex flex-col sm:flex-row gap-2 items-end"
+        style={{ right: scienceRightOffset ?? 16 }}
       >
-        {showScience ? 'Hide' : 'Show'} Science HUD
-      </button>
-
-      {/* UV pulse button */}
-      <button
-        className="fixed top-4 right-48 z-40 px-3 py-2 rounded-md bg-amber-700/90 border border-amber-500 text-xs text-amber-100 hover:bg-amber-600"
-        onClick={handleUVPulse}
-      >
-        UV Pulse
-      </button>
+        <button
+          className={`px-3 py-2 rounded-md border text-xs text-amber-100 hover:bg-amber-600 ${uvPulseActive ? 'bg-amber-500/90 border-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.7)]' : 'bg-amber-700/90 border-amber-500'}`}
+          onClick={handleUVPulse}
+        >
+          {uvPulseActive ? 'UV Pulse Active' : 'UV Pulse'}
+        </button>
+        <button
+          className="px-3 py-2 rounded-md bg-slate-800/80 border border-slate-700 text-xs text-slate-200 hover:bg-slate-700"
+          onClick={() => setShowScience(v => !v)}
+        >
+          {showScience ? 'Hide' : 'Show'} Science HUD
+        </button>
+      </div>
 
       {showScience && (
-        <div className="fixed top-14 right-4 z-30 bg-slate-900/90 border border-slate-700 rounded-lg shadow-lg p-3 text-xs text-slate-200 w-60">
+        <div
+          className="fixed top-28 z-30 bg-slate-900/90 border border-slate-700 rounded-lg shadow-lg p-3 text-xs text-slate-200 w-60"
+          style={{ right: scienceRightOffset ?? 16 }}
+        >
           <div className="flex items-center justify-between mb-2">
             <span className="font-semibold text-slate-100">Scale HUD</span>
             <span className="text-[10px] text-slate-500">1 unit = 1 mm</span>
@@ -715,6 +784,8 @@ const App: React.FC = () => {
         collagenReduced={collagenReduced}
         onCollagenToggle={() => handleCollagenDensityChange(!collagenReduced)}
       />
+
+      <XRDebugPanel info={xrDebugInfo} />
 
       {/* Comparison View */}
       {showComparison && (
